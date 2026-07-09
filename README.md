@@ -1,4 +1,4 @@
-# jira-xray-tc-pipeline
+# jira-xray-TC
 
 Two Claude Code skills that automate test-case work against a Jira Server + Xray instance:
 
