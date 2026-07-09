@@ -35,15 +35,15 @@ Creates Xray Test issues in Jira Server, linked to a user story, matching the us
 ## Inputs (gather before starting)
 
 **Batch mode (default when she names a story key or an Excel file):**
-- Excel path, OR story key → resolve to `<TC_OUTPUT_DIR>/<KEY>_*.xlsx` (glob; multiple matches → ask which; none → suggest running `/jira-tc-build` first).
+- Excel path, OR story key → resolve by recursive glob `<TC_OUTPUT_DIR>/**/<KEY>_*.xlsx` (each story nests in its own sub-folder `<KEY>_<Story title>/<KEY>_<Story title>.xlsx`; also match the legacy flat `<TC_OUTPUT_DIR>/<KEY>_*.xlsx`). Multiple matches → ask which; none → suggest running `/jira-tc-build` first.
 - Story key = filename prefix before first `_` (validate `^[A-Z]+-\d+$`). Prefix determines project id (constants table).
 - Rows read with `<PYTHON_WITH_OPENPYXL>` + openpyxl from the `<KEY> Test Cases` sheet (fallback: first sheet). Expected 9-column contract: `TC ID | Test Case Title | Test Case Description | Preconditions | Test Data | Detailed Steps to Follow | Expected Result | Priority | Type`. Headers mismatch → show diff, ask before proceeding.
 
 **Single mode:** a pasted table row (same columns, Priority/Type optional) or a screenshot, plus story key. Story key missing → ask.
 
 **Both modes:**
-- **TC number** — sequential `TC01`, `TC02`, ... derived from the TC ID (`TC_OTP_01` → `TC01`).
-- Priority: NOT an input — always **High** (the user's standing rule, YYYY-MM-DD). Workbook Priority column is planning-only; ignore for the payload. Only deviate if she explicitly says so.
+- **TC number** — sequential `TC01`, `TC02`, ... derived from the TC ID (`TC_FEAT_01` → `TC01`).
+- Priority: **per-row, read from the workbook `Priority` column** for each Test (Critical/High/Medium/Low). Map the Excel value to the Jira priority NAME 1:1 (this server: `Critical`/`Highest`/`High`/`Medium`/`Low`/`Lowest`). Blank/unknown cell → default `High` and flag it in the report.
 - **Label** — from the Type column: `Valid` → `Positive`, `Negative` → `Negative`. Missing/other Type → ask (do not guess).
 
 ## Hard rules (the user's convention — never deviate)
@@ -52,14 +52,17 @@ Creates Xray Test issues in Jira Server, linked to a user story, matching the us
 3. **Description field** = description text + `Steps to follow` numbered list + `Expected result` paragraph (rule updated YYYY-MM-DD: Expected result INCLUDED). No precondition / test data / external ref unless the user says otherwise.
 4. **Xray Manual Test Steps grid stays EMPTY** — REST create never touches it; do not add steps post-create.
 5. **Link:** `Tests` link type, **outward** from the Test to the story (`tests → PROJ1-xxxx`), passed in the create payload's `update.issuelinks`.
-6. **Assignee = the user** (`YOUR_JIRA_USERNAME`), **Priority = High always** (standing rule).
-7. **Public-action gate:** get explicit "yes create" in-turn BEFORE any POST. Single mode: show the full payload (summary, description verbatim, priority, label, link). Batch mode: ONE gate for the whole batch — show a table of every pending create (`TC<nn> | title | label | link → <STORY>`) plus one full sample payload; explicit "yes create" covers the listed batch and nothing else. New/changed rows after the gate → re-gate.
-8. **Labels:** every Test gets exactly one of `Positive` | `Negative` (mapped from Type: Valid→Positive). Payload: `"labels": ["Positive"]`. Never invent other labels.
+6. **Assignee = the user** (`YOUR_JIRA_USERNAME`). **Priority = per-row, fetched from the workbook `Priority` column** — each Test carries its own priority. Map the Excel value to the Jira priority NAME 1:1 (`Critical`/`Highest`/`High`/`Medium`/`Low`/`Lowest`). Payload: `"priority":{"name":"<row Priority>"}`. Blank cell → default `High` + flag. Never post a priority the row didn't specify.
+7. **Public-action gate:** get explicit "yes create" in-turn BEFORE any POST. Single mode: show the full payload (summary, description verbatim, priority, label, link). Batch mode: ONE gate for the whole batch — show a table of every pending create (`TC<nn> | title | label | priority | link → <STORY>`) plus one full sample payload; explicit "yes create" covers the listed batch and nothing else. New/changed rows after the gate → re-gate.
+8. **Labels:** every Test gets exactly one of `Positive` | `Negative` (mapped from Type: Valid→Positive). **GOTCHA:** on some Xray configs the `labels` field is NOT on the Test CREATE screen — sending `fields.labels` in the POST returns 201 but the label is silently dropped (issue ends up `[]`). If a post-create GET shows empty labels, apply the label as a **follow-up PUT**: `PUT /rest/api/2/issue/<newKey>` body `{"update":{"labels":[{"set":["Positive"]}]}}` → expect **204**, then GET-verify. Never invent other labels.
+9. **Mandatory human review gate (MUST precede rule 7 — no upload without it):** the TCs are the user's to approve before any post. After resolving the Excel, present the full TC content for review — every row's `TC ID | Title | Type/Label | Priority` as a table PLUS the AC-coverage mapping, and point to the workbook path to open. State explicitly: *"Review the test cases before I upload — reply `approved` (or list row numbers to change) once you've checked them."* Do NOT proceed to the rule-7 "yes create" gate until the user has reviewed and approved. Silence, "go", or an earlier "sounds good" is NOT review approval. Edits → `/jira-tc-build` regenerates the workbook, then re-run this gate on the new content.
 
 ## Procedure
-0. **Batch only (local, before any Jira call):** resolve the Excel (Inputs), read all rows, derive story key from filename, map each row → `{tcNum, summary, description, label}`. Show row count + story key. Empty sheet or unparseable rows → stop, ask.
-1. `spawn_browser` `{sandbox: false, user_data_dir: "~/.claude/stealth-profiles/jira"}` — persistent profile keeps her session (VERIFIED YYYY-MM-DD: fresh spawn → authenticated, REST /myself 200, no login).
-2. `navigate` to `<base>/browse/<STORY>`. If a hard login form appears (`#os_username` / "You must log in"), ask the user to log in herself in the visible window — never handle her bank password. Confirm authenticated: `!!document.querySelector('#create_link')`.
+0. **Batch only (local, before any Jira call):** resolve the Excel (Inputs), read all rows, derive story key from filename, map each row → `{tcNum, summary, description, label, priority}` (priority from the `Priority` column — rule 6). Show row count + story key. Empty sheet or unparseable rows → stop, ask.
+0.5. **HUMAN REVIEW GATE (rule 9 — mandatory, before spawning the browser):** present the full TC set for review — table of `TC ID | Title | Type/Label | Priority` for every row + the AC-coverage mapping + the workbook path to open. Ask the user to reply `approved` or name rows to change. Do NOT spawn the browser or touch Jira until approved. Edits → regenerate via `/jira-tc-build`, re-run this gate. (Separate from and precedes the rule-7 create gate.)
+1. `spawn_browser` `{sandbox: false, user_data_dir: "~/.claude/stealth-profiles/jira"}` — persistent profile keeps the session (fresh spawn → authenticated, REST /myself 200, no login when the profile already holds the SSO session).
+2. `navigate` to `<base>/browse/<STORY>`. If a hard login form appears (`#os_username` / "You must log in"), ask the user to log in in the visible window — never handle the password. Confirm authenticated: `!!document.querySelector('#create_link')`.
+2.5. **Dedupe + numbering (batch) — the ONLY place dedup happens; the Excel stays the full suite:** `GET /rest/api/2/issue/<STORY>?fields=issuelinks` → collect existing `tested by` Test summaries (`TC<nn> | <title>`). For each pending row: if its title matches an existing Test's title (case/space-insensitive) or is clearly the same scenario → SKIP the create (report "already exists → <key>"), never post a duplicate. For rows that DO get posted, if their `TC<nn>` number collides with a DIFFERENT existing Test's number, renumber the posted rows to continue after the highest existing `TC<nn>` (e.g. story already has TC01–TC03 → post remaining net-new as TC04+). The workbook file is never modified. Show the skip list + final posted numbering at the checkpoint (rule 7). Nothing left to post after dedupe → report and stop.
 3. Build the payload:
    ```json
    {
@@ -69,7 +72,7 @@ Creates Xray Test issues in Jira Server, linked to a user story, matching the us
        "summary":   "TC<nn> | <title>",
        "description": "<description>\n\nSteps to follow\n1. ...\n\nExpected result\n<expected>",
        "assignee":  {"name": "YOUR_JIRA_USERNAME"},
-       "priority":  {"name": "High"},
+       "priority":  {"name": "<row Priority — rule 6, Critical/High/Medium/Low>"},
        "labels":    ["<Positive|Negative — rule 8>"]
      },
      "update": {
@@ -79,8 +82,9 @@ Creates Xray Test issues in Jira Server, linked to a user story, matching the us
    ```
 4. **CHECKPOINT** (rule 7): single → present payload; batch → present the pending-creates table + one sample payload. Wait for explicit yes.
 5. POST via the **two-step async pattern** (see Gotchas): `fetch('/jira/rest/api/2/issue', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)})` → stash `{status, body}` on `window.__jtcCreate` → read it in a second `execute_script`. Expect **201** with `{key: "PROJ1-xxxx"}`.
-   Batch: POST rows SEQUENTIALLY (one at a time, verify 201 before next — no Promise.all; parallel creates risk rate-limit and out-of-order TC numbers). **Pause 5 seconds between each create** (server courtesy — the user's rule, YYYY-MM-DD): in-page `await new Promise(r => setTimeout(r, 5000))` before each POST after the first, or wait between execute_script calls. Never batch faster even if the server looks fine. A row failure does NOT stop the batch: record `{tcId, status, error}`, continue, report all failures at the end. 3 consecutive failures → stop, report, ask.
-6. Verify server-side: `GET /rest/api/2/issue/<newKey>?fields=summary,issuetype,assignee,priority,labels,issuelinks,description` → assert issuetype id 11300, assignee, priority, label present (rule 8), `tests → <STORY>` in issuelinks, description contains "Expected result". Batch: verify all created keys in one loop after posting.
+   Batch: POST rows SEQUENTIALLY (one at a time, verify 201 before next — no Promise.all; parallel creates risk rate-limit and out-of-order TC numbers). **Pause 5 seconds between each create** (server courtesy): in-page `await new Promise(r => setTimeout(r, 5000))` before each POST after the first, or wait between execute_script calls. Never batch faster even if the server looks fine. A row failure does NOT stop the batch: record `{tcId, status, error}`, continue, report all failures at the end. 3 consecutive failures → stop, report, ask.
+   **5a. Apply label (rule 8 gotcha):** if the create dropped the label (post-create GET shows `labels:[]`, common on Xray Test create screens), `PUT /rest/api/2/issue/<newKey>` `{"update":{"labels":[{"set":["<Positive|Negative>"]}]}}` → expect 204.
+6. Verify server-side: `GET /rest/api/2/issue/<newKey>?fields=summary,issuetype,assignee,priority,labels,issuelinks,description` → assert issuetype id 11300, assignee, **priority == the row's Priority** (rule 6), label present (rule 8), `tests → <STORY>` in issuelinks, description contains "Expected result". Batch: verify all created keys in one loop after posting.
 7. Report: table of `TC<nn> | new key | URL | label | verified ✓/✗` (single row for single mode) + failed rows with reasons. Ask before `close_instance` (she may keep working).
 
 If discovery is ever needed again (constants drift, new project): `GET /issuetype` (filter name "Test" + xpandit iconUrl), `GET /project/<KEY>`, `GET /issueLinkType`, `GET /myself` — all via authenticated page fetch.

@@ -6,8 +6,8 @@ description: >-
   description + acceptance criteria via an
   authenticated stealth-browser REST session (read-only), designs exhaustive
   valid + negative test cases covering every acceptance-criteria line, and saves
-  the workbook to <TC_OUTPUT_DIR> as
-  "<KEY>_<Story title>.xlsx" in the exact column contract /jira-tc-upload consumes.
+  the workbook to <TC_OUTPUT_DIR> in a per-story sub-folder
+  "<KEY>_<Story title>/<KEY>_<Story title>.xlsx" in the exact column contract /jira-tc-upload consumes.
   Use when the user says "build test cases for PROJ1-xxxx", "jira tc build PROJ1-xxxx",
   "create the TC excel from this story", or gives a PROJ1 key and asks for test cases.
   Never writes to Jira — posting is /jira-tc-upload's job. Not for Jira Cloud.
@@ -28,7 +28,7 @@ Fetches ONE user story from Jira Server (read-only), designs test cases covering
 - **Dynamic project resolution:** story key prefix = project key. Prefix in the table → use cached id. Any other prefix → resolve live: `GET /rest/api/2/project/<PREFIX>` → `.id` (authenticated page fetch, two-step async). 404 → unknown project, ask the user. On success append the new row to this table.
 - Stealth profile: `spawn_browser {sandbox: false, user_data_dir: "~/.claude/stealth-profiles/jira"}` — persistent session, no login normally needed
 - the user's username: `YOUR_JIRA_USERNAME`
-- Output dir: `<TC_OUTPUT_DIR>` (mkdir -p before save; it may be recreated)
+- Output dir: `<TC_OUTPUT_DIR>` — one sub-folder per story `<KEY>_<Story title>/`, xlsx of the same base name inside it (see rule 6). `mkdir -p` the sub-folder before save.
 - Python for Excel: `<PYTHON_WITH_OPENPYXL>` (has openpyxl; plain `python3` on this Mac does NOT)
 
 ## Inputs
@@ -41,10 +41,10 @@ Fetches ONE user story from Jira Server (read-only), designs test cases covering
 3. **Exhaustive AC coverage** (the user's standing preference): every acceptance-criteria line and every business-requirement line maps to at least one Valid AND at least one Negative test case. No sampling. The AC Coverage sheet must prove it.
 4. **Column contract is LOCKED** (what /jira-tc-upload parses — order and headers exactly):
    `TC ID | Test Case Title | Test Case Description | Preconditions | Test Data | Detailed Steps to Follow | Expected Result | Priority | Type`
-5. **TC ID format:** `TC_<FEATURE>_01` sequential, where `<FEATURE>` is a short slug from the story (e.g. `FEAT`). /jira-tc-upload maps `TC_OTP_01` → `TC01` when posting.
-6. **Filename:** `<KEY>_<Story title>.xlsx`, title sanitized for the filesystem: strip/replace `/ \ : * ? " < > |` with `-`, collapse whitespace, trim to ≤120 chars. Example: `PROJ1-5754_Credit cards payments FEAT.xlsx`.
+5. **TC ID format:** `TC_<FEATURE>_01` sequential, where `<FEATURE>` is a short slug from the story (e.g. `FEAT`). /jira-tc-upload maps `TC_FEAT_01` → `TC01` when posting.
+6. **Folder + filename:** each story gets its OWN folder named `<KEY>_<Story title>`, and the workbook sits inside it under the same base name — final path `<TC_OUTPUT_DIR>/<KEY>_<Story title>/<KEY>_<Story title>.xlsx`. Title sanitized for the filesystem: strip/replace `/ \ : * ? " < > |` with `-`, collapse whitespace, trim to ≤120 chars. Example: `PROJ1-5754_Credit cards payments FEAT/PROJ1-5754_Credit cards payments FEAT.xlsx`. (Folder name = filename stem; spaces kept.)
 7. **Existing file at target path → ask before overwrite.** Offer `_v2` suffix.
-8. Priority column is for the workbook and test planning. /jira-tc-upload still posts everything as High (the user's standing Jira rule) — do not "fix" that here.
+8. Priority column drives the created issue's priority: `/jira-tc-upload` posts each Test with the row's own Priority (Critical/High/Medium/Low), fetched per row — NOT a fixed value. So set each row's Priority deliberately during design; it carries through to Jira.
 
 ## Procedure
 
@@ -53,6 +53,7 @@ Fetches ONE user story from Jira Server (read-only), designs test cases covering
 2. `navigate` to `<base>/browse/<KEY>`. Auth check: `!!document.querySelector('#create_link')`. Login form → rule 2.
 3. GET the issue via the **two-step async pattern** (see Gotchas):
    `fetch('/jira/rest/api/2/issue/<KEY>?fields=summary,description,issuetype,status,priority', ...)` → stash on `window.__jtbFetch` → read in second `execute_script`. Expect 200.
+3a. **The Excel is always the FULL exhaustive suite** — build every valid + negative case from TC01, covering all AC/business lines, regardless of any tests already linked on the story (the workbook is the complete design record). De-duplication against tests already in Jira is `/jira-tc-upload`'s job at create time — do NOT drop or renumber rows here to avoid existing tests.
 4. If `description` lacks an "Acceptance Criteria" section, GET the full issue (no `fields` param) and scan custom fields for names containing "acceptance" (via `editmeta` or `/rest/api/2/field` cached list). Still nothing → show the user the description and ask her to paste/confirm the AC.
 5. Sanity: issue should be a story/demand type, not a Test. If issuetype is an Xray Test → wrong key, ask.
 
@@ -78,7 +79,7 @@ Steps are numbered, one action per line, starting from login/channel entry. Test
 No formulas needed (static data) — if any are added, run recalc per xlsx-skill rules.
 
 ### 5. Save + report
-1. `mkdir -p <TC_OUTPUT_DIR>`, save as rule 6 filename (rule 7 if exists).
+1. `mkdir -p "<TC_OUTPUT_DIR>/<KEY>_<Story title>"`, save the xlsx inside that sub-folder as rule 6 path (rule 7 if exists).
 2. Verify: reload workbook, assert sheet names, 9 headers exact, row count.
 3. Report to the user: file path, TC count (valid/negative split), priority counts, the AC Coverage table inline, and any assumptions made (below-due behavior, channel list, etc.) flagged for her confirmation.
 4. Ask before `close_instance` (she may chain into `/jira-tc-upload` with the same session).
@@ -95,4 +96,4 @@ No formulas needed (static data) — if any are added, run recalc per xlsx-skill
 - Sync reads: wrap in IIFE `(function(){ ... })()` — bare `return` throws SyntaxError.
 - Jira wiki `{panel}` blocks often wrap AC on this server — strip the markers, keep the lines.
 - Scratchpad may reset between turns — write generator scripts fresh; the xlsx is the durable artifact.
-- Filename keeps spaces (the user's convention: `PROJ1-5754_Credit cards payments FEAT.xlsx`) — only forbidden filesystem chars are replaced.
+- Filename keeps spaces. Story gets its own folder; xlsx nests inside with the same base name: `PROJ1-5754_Credit cards payments FEAT/PROJ1-5754_Credit cards payments FEAT.xlsx` — only forbidden filesystem chars are replaced.
